@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Agent POC — Browser Multi-Tool</title>
+  <!-- Bootstrap -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    html, body { height:100%; }
+    body { display:flex; flex-direction:column; }
+    #app { max-width: 960px; width:100%; margin: 1rem auto; }
+    #messages { height: 50vh; overflow-y:auto; padding: 1rem; background:#f8f9fa; border-radius:.5rem; border:1px solid #dee2e6; }
+    .msg { margin-bottom: .75rem; }
+    .msg .role { font-weight:600; margin-right:.25rem; }
+    .msg.assistant .bubble { background:#fff; }
+    .bubble { white-space:pre-wrap; background:#fff; border:1px solid #e9ecef; border-radius:.5rem; padding:.5rem .75rem; }
+    .tool-block { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.9rem; }
+    .toolbar { gap:.5rem; }
+    .small { font-size: .875rem; }
+    .spinner { display:inline-block; width:1rem; height:1rem; border:.2rem solid #dee2e6; border-top-color:#0d6efd; border-radius:50%; animation:spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg);} }
+    .kv input { font-family: monospace; }
+  </style>
+</head>
+<body>
+  <div id="app" class="container">
+    <header class="mb-3 d-flex align-items-center justify-content-between">
+      <h1 class="h4 m-0">LLM Agent POC — Browser Multi-Tool</h1>
+      <div class="toolbar d-flex">
+        <button id="btn-provider" class="btn btn-sm btn-primary">Pick Model</button>
+        <button id="btn-reset" class="btn btn-sm btn-outline-danger">Reset</button>
+      </div>
+    </header>
+
+    <section class="mb-3">
+      <div class="row g-3">
+        <div class="col-md-8">
+          <div id="messages" class="shadow-sm"></div>
+        </div>
+        <div class="col-md-4">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h5 class="card-title mb-2">Keys / Settings</h5>
+              <div class="small text-muted mb-2">Optional, but needed for Google search API. Values are kept in localStorage.</div>
+              <div class="kv mb-2">
+                <label class="form-label small">Google API Key</label>
+                <input id="google-key" class="form-control form-control-sm" placeholder="AIza..." />
+              </div>
+              <div class="kv mb-3">
+                <label class="form-label small">Google CSE ID (cx)</label>
+                <input id="google-cx" class="form-control form-control-sm" placeholder="e.g. abc123:def456" />
+              </div>
+              <div class="kv mb-2">
+                <label class="form-label small">Custom Base URL (optional)</label>
+                <input id="custom-base" class="form-control form-control-sm" placeholder="https://aipipe.org/openai/v1" />
+              </div>
+              <div class="kv mb-3">
+                <label class="form-label small">Custom API Key (optional)</label>
+                <input id="custom-key" class="form-control form-control-sm" placeholder="sk-..." />
+              </div>
+              <button id="save-keys" class="btn btn-sm btn-secondary">Save</button>
+            </div>
+          </div>
+          <div class="card mt-3 shadow-sm">
+            <div class="card-body">
+              <h6 class="card-title">Tips</h6>
+              <ul class="small m-0 ps-3">
+                <li>Use <code>Pick Model</code> to select provider/model via Bootstrap modal.</li>
+                <li>AI Pipe proxy tool works without auth: fetch any URL via <code>aipipe.org/proxy</code>.</li>
+                <li>JS eval runs in a sandboxed Web Worker with a time limit.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <form id="chat" class="d-flex gap-2">
+        <input id="prompt" class="form-control" placeholder="Type a message..." autocomplete="off" />
+        <button class="btn btn-primary" type="submit">Send</button>
+      </form>
+    </section>
+  </div>
+
+  <!-- Bootstrap JS -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script type="module">
+    // --- Imports ---
+    import { bootstrapAlert } from "https://cdn.jsdelivr.net/npm/bootstrap-alert@1";
+    import { openaiConfig } from "https://cdn.jsdelivr.net/npm/bootstrap-llm-provider@1.3.1/dist/bootstrap-llm-provider.js";
+
+    // --- Simple state ---
+    const el = (sel) => document.querySelector(sel);
+    const messagesEl = el('#messages');
+    const promptEl = el('#prompt');
+
+    const state = {
+      provider: { baseURL: '', apiKey: '', model: '' },
+      messages: [],
+      running: false,
+    };
+
+    // --- Persisted keys ---
+    const LS = {
+      get k() { return localStorage.getItem('google-key') || ''; },
+      set k(v) { localStorage.setItem('google-key', v||''); },
+      get cx() { return localStorage.getItem('google-cx') || ''; },
+      set cx(v) { localStorage.setItem('google-cx', v||''); },
+      get base() { return localStorage.getItem('custom-base') || ''; },
+      set base(v) { localStorage.setItem('custom-base', v||''); },
+      get key() { return localStorage.getItem('custom-key') || ''; },
+      set key(v) { localStorage.setItem('custom-key', v||''); },
+    }
+    const fillKeys = () => {
+      el('#google-key').value = LS.k; el('#google-cx').value = LS.cx;
+      el('#custom-base').value = LS.base; el('#custom-key').value = LS.key;
+    };
+    fillKeys();
+    el('#save-keys').onclick = () => { LS.k = el('#google-key').value.trim(); LS.cx = el('#google-cx').value.trim(); LS.base = el('#custom-base').value.trim(); LS.key = el('#custom-key').value.trim(); bootstrapAlert({ title:'Saved', body:'Keys stored in localStorage', color:'success' }); };
+
+    // --- UI helpers ---
+    function addMsg(role, text, {rawHTML=false}={}) {
+      const wrap = document.createElement('div');
+      wrap.className = `msg ${role}`;
+      const who = document.createElement('span');
+      who.className = 'role';
+      who.textContent = role === 'user' ? 'You' : role === 'assistant' ? 'Agent' : role;
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      if (rawHTML) bubble.innerHTML = text; else bubble.textContent = text;
+      wrap.appendChild(who); wrap.appendChild(bubble);
+      messagesEl.appendChild(wrap);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return bubble; // return bubble to live-update during streaming if needed
+    }
+
+    function addToolBlock(name, payload, callId) {
+      const pre = document.createElement('pre');
+      pre.className = 'bubble tool-block';
+      pre.textContent = JSON.stringify({ tool: name, payload }, null, 2);
+      const wrap = document.createElement('div');
+      wrap.className = 'msg tool';
+      const who = document.createElement('span');
+      who.className = 'role'; who.textContent = `tool:${name}`;
+      wrap.appendChild(who); wrap.appendChild(pre);
+      messagesEl.appendChild(wrap);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    // --- Provider modal ---
+    async function pickProvider(force=false) {
+      try {
+        const conf = await openaiConfig({ force });
+        // openaiConfig returns { baseURL, apiKey, model } (uses Bootstrap modal)
+        state.provider = conf;
+        bootstrapAlert({ title: 'Provider Selected', body: `${conf.model} @ ${new URL(conf.baseURL).host}`, color: 'info' });
+        return conf;
+      } catch (e) {
+        console.warn('Provider modal failed, falling back to custom base/key...', e);
+        if (!LS.base || !LS.key) {
+          bootstrapAlert({ title: 'Pick Model', body: 'Use the Pick Model button, or fill Custom Base URL + API Key in Settings.', color: 'warning' });
+        }
+        state.provider = { baseURL: LS.base, apiKey: LS.key, model: 'gpt-4o-mini' };
+        return state.provider;
+      }
+    }
+
+    el('#btn-provider').onclick = () => pickProvider(true);
+    el('#btn-reset').onclick = () => { state.messages = []; messagesEl.innerHTML = ''; bootstrapAlert({ body: 'Cleared chat', color:'secondary' }); };
+
+    // --- Tools (OpenAI-style function calling) ---
+    const toolDefs = [
+      {
+        type: 'function',
+        function: {
+          name: 'google_search_snippets',
+          description: 'Use Google Custom Search to fetch top web results with title, link and snippet.',
+          parameters: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'User search query' },
+              num: { type: 'integer', description: 'Number of results (1-10)', minimum: 1, maximum: 10, default: 5 }
+            },
+            required: ['query']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'aipipe_proxy_fetch',
+          description: 'Fetch any URL via https://aipipe.org/proxy/[URL] to bypass CORS. Returns JSON or text.',
+          parameters: {
+            type: 'object',
+            properties: {
+              url: { type: 'string', description: 'Absolute URL to fetch (http/https)' },
+              method: { type: 'string', enum: ['GET','POST','PUT','DELETE','PATCH','HEAD','OPTIONS'], default: 'GET' },
+              headers: { type: 'object', additionalProperties: { type: 'string' } },
+              body: { anyOf: [ { type:'string' }, { type:'object' }, { type:'null' } ] }
+            },
+            required: ['url']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'js_eval',
+          description: 'Run JavaScript in a sandboxed Web Worker. Returns logs and result. No DOM access.',
+          parameters: {
+            type: 'object',
+            properties: {
+              code: { type: 'string' },
+              timeout_ms: { type: 'integer', default: 2000 }
+            },
+            required: ['code']
+          }
+        }
+      }
+    ];
+
+    const toolFns = {
+      async google_search_snippets({ query, num = 5 }) {
+        if (!LS.k || !LS.cx) throw new Error('Google API key / CSE ID missing. Fill them in Settings.');
+        const u = new URL('https://www.googleapis.com/customsearch/v1');
+        u.searchParams.set('key', LS.k);
+        u.searchParams.set('cx', LS.cx);
+        u.searchParams.set('q', query);
+        u.searchParams.set('num', Math.min(10, Math.max(1, +num||5)));
+        const r = await fetch(u).then(r=>r.json());
+        const items = (r.items||[]).map(x=>({ title:x.title, link:x.link, snippet:x.snippet }));
+        return { query, items };
+      },
+
+      async aipipe_proxy_fetch({ url, method='GET', headers={}, body=null }) {
+        const prox = `https://aipipe.org/proxy/${encodeURIComponent(url)}`;
+        const opt = { method, headers };
+        if (body!==null) opt.body = typeof body === 'string' ? body : JSON.stringify(body);
+        const resp = await fetch(prox, opt);
+        const text = await resp.text();
+        try { return { url, status: resp.status, json: JSON.parse(text) }; } catch { return { url, status: resp.status, text }; }
+      },
+
+      async js_eval({ code, timeout_ms = 2000 }) {
+        const workerCode = `self.onmessage = async (e) => {\n  const code = e.data;\n  let logs = [];\n  const send = (type, data) => postMessage({type, data});\n  const orig = console.log;\n  console.log = (...a)=>send('log', a.map(x=>{try{return typeof x==='string'?x:JSON.stringify(x);}catch{return String(x)}}).join(' '));\n  try {\n    const result = await (async()=>{ return await (0, eval)(code); })();\n    send('done', { result });\n  } catch (err) {\n    send('error', { message: err && err.message ? err.message : String(err) });\n  }\n};`;
+        const blob = new Blob([workerCode], { type: 'text/javascript' });
+        const worker = new Worker(URL.createObjectURL(blob));
+        const logs = [];
+        const out = await new Promise((resolve) => {
+          const timer = setTimeout(()=>{ worker.terminate(); resolve({ timeout:true }); }, timeout_ms);
+          worker.onmessage = (e)=>{
+            if (e.data.type==='log') logs.push(e.data.data);
+            if (e.data.type==='done') { clearTimeout(timer); worker.terminate(); resolve({ logs, result: e.data.data.result }); }
+            if (e.data.type==='error') { clearTimeout(timer); worker.terminate(); resolve({ logs, error: e.data.data.message }); }
+          };
+        });
+        return out;
+      }
+    };
+
+    // --- Core Agent Loop ---
+    async function llmLoop(userText) {
+      if (!state.provider.baseURL || !state.provider.apiKey) await pickProvider();
+      const { baseURL, apiKey, model } = state.provider.baseURL ? state.provider : { baseURL: LS.base, apiKey: LS.key, model: 'gpt-4o-mini' };
+      if (!baseURL || !apiKey) throw new Error('Provider not configured. Use Pick Model or fill Custom Base URL + API Key.');
+
+      state.messages.push({ role:'user', content: userText });
+
+      while (true) {
+        // 1) Call LLM with tools
+        const body = { model, messages: state.messages, tools: toolDefs, tool_choice: 'auto' };
+        const res = await fetch(baseURL.replace(/\/$/, '') + '/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify(body)
+        });
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(`LLM error ${res.status}: ${errText}`);
+        }
+        const data = await res.json();
+        const choice = data.choices?.[0];
+        const msg = choice?.message || {};
+
+        // Show assistant output (if any)
+        if (msg.content) addMsg('assistant', msg.content);
+
+        // 2) If there are tool calls, execute in parallel and loop again
+        const tcs = msg.tool_calls || [];
+        if (tcs.length) {
+          state.messages.push({ role:'assistant', content: msg.content||'', tool_calls: tcs });
+          const results = await Promise.all(tcs.map(async tc => {
+            try {
+              const fn = toolFns[tc.function.name];
+              if (!fn) throw new Error(`Unknown tool: ${tc.function.name}`);
+              const args = JSON.parse(tc.function.arguments || '{}');
+              const out = await fn(args);
+              addToolBlock(tc.function.name, out, tc.id);
+              const toolMsg = { role:'tool', tool_call_id: tc.id, content: JSON.stringify(out) };
+              state.messages.push(toolMsg);
+              return { ok:true };
+            } catch (err) {
+              const errPayload = { error: err?.message || String(err) };
+              addToolBlock(tc.function.name, errPayload, tc.id);
+              state.messages.push({ role:'tool', tool_call_id: tc.id, content: JSON.stringify(errPayload) });
+              return { ok:false };
+            }
+          }));
+          // Continue the loop to let the LLM consume tool outputs
+          continue;
+        }
+        // 3) No tool calls — stop and wait for next user input
+        break;
+      }
+    }
+
+    // --- Form submit ---
+    el('#chat').addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      if (state.running) return;
+      const text = promptEl.value.trim();
+      if (!text) return;
+      promptEl.value = '';
+      addMsg('user', text);
+
+      try { state.running = true; await llmLoop(text); }
+      catch (err) {
+        console.error(err);
+        bootstrapAlert({ title:'Error', body: String(err.message || err), color:'danger' });
+      } finally { state.running = false; }
+    });
+
+    // --- Welcome message ---
+    addMsg('assistant', ' Hi! I can search Google, call the AI Pipe proxy, and run JavaScript. Pick a model, then ask me to do something.');
+  </script>
+</body>
+</html>
